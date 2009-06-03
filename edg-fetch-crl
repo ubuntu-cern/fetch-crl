@@ -1,0 +1,939 @@
+#!/bin/sh
+
+# $Name:  $
+# $Id: edg-fetch-crl.cin,v 1.24 2009/01/29 13:47:22 pmacvsdg Exp $
+
+
+###############################################################################
+# File:        edg-fetch-crl                                                  #
+#                                                                             #
+# Version:     2.7.0
+#                                                                             #
+# Description: this script is useful to download and install a set of         #
+#              certificate revocation lists (CRL) published by the            #
+#              Certification Authorities supported by the DataGRID project.   #
+#              Each CRL file is downloaded, appropiately named and copied to  #
+#              the specified directory so that Globus can find it.            #
+#                                                                             #
+# Usage:       edg-fetch-crl [-h|--help]                                      #
+#              edg-fetch-crl [-l|--loc locationDirectory]                     #
+#                            [-o|--out outputDirectory] [-q|--quiet]          #
+#                            [-a|--agingtolerance hours ]                     #
+#                                                                             #
+# Author:      Fabio Hernandez                                                #
+#              fabio@in2p3.fr                                                 #
+#              IN2P3 Computer Center                                          #
+#              http://www.in2p3.fr/CC                                         #
+#              Lyon (FRANCE)                                                  #
+#                                                                             #
+# Date:        Aug 2001                                                       #
+#              Dec 2002 - fix problem with openssl                            #
+#              Apr 2003 - add support for EDG v2.0-style config files         #
+#              Feb 2005 - DG - fix security vulnerability related to tmpfiles #
+#              Feb 2005 - DG - make it paranoid about overwriting any.r0 file #
+#              Feb 2005 - DG - new packaging format for RPM, no cron job left #
+#              Aug 2005 - DG - ensure the latest version of OpenSSL gets used #
+#              Oct 2005 - RW - fix https handling problem with wget           #
+#              Nov 2005 - DG - fix issue with overwriting good CRL by old one #
+#              Jan 2006 - DG - allow for entirely untrusted DL source for CRL #
+#              May 2006 - DG - replace CRLs with lastUpdate in the future     #
+#              Jan 2009 - DG - new error codes (1=download error, 2=setup err #
+#                         drop text in output, DEFAULTPATH support, &c.       #
+#                                                                             #
+###############################################################################
+
+#-----------------------------------------------------------------------------#
+#                        I N I T I A L I Z A T I O N                          #
+#-----------------------------------------------------------------------------#
+
+#
+# Needed commands: it is useful to specify the full path of the needed commands here
+# in order to be able to run this script within te context of a user whitout the
+# PATH environment varible initialized (e.g. cron, root, ...)
+#
+openssl=openssl
+lynx=lynx
+wget=wget
+basename=basename
+getopt=getopt
+awk=awk
+cat=cat
+cp=cp
+cmp=cmp
+chmod=chmod
+chown=chown
+chgrp=chgrp
+mv=mv
+rm=rm
+id=id
+ls=ls
+date=date
+sed=sed
+grep=grep
+mktemp=mktemp
+stat=stat
+sum=sha1sum
+
+#
+# Global variables
+#
+programName=`${basename} $0`
+tempDir="/tmp"                   # temporary directory
+verboseMode=1                    # enable message display
+outputDirectory=`pwd`            # default output directory is current directory
+crlLocationFileSuffix="crl_url"  # this script will look for files with this extension
+cRLAgingThreshold=0              # maximum age of a local CRL before download
+                                 # errors are shown to the user
+noServerCertCheck=1              # require valid server cert
+wgetAdditionalOptions=""         # require valid server cert
+syslogfacility=""                # syslog facility (empty == disabled)
+outputLogFile=""                 # explicit output logfile
+resetpathmode="yes"              # whether or not set re-set $PATH, and when
+                                 # yes=always, searchopenssl=search for openssl 
+                                 # with old path, then reset, no=keep original
+allWarnings=no                   # warnings follow verbosity
+
+# get defaults
+WGET_RETRIES=2
+WGET_TIMEOUT=10
+FETCH_CRL_SYSCONFIG="${FETCH_CRL_SYSCONFIG:-/etc/sysconfig/fetch-crl}"
+
+# specific work-around for incidental filesystem corruption
+# (please enable only in case you have broken hardware or a broken
+# filesystem implementation. In that case, set this variable to
+# the value "yes_i_really_do") ...
+I_TAKE_FULL_RESPONSIBILITY_FOR_OVERWRITING_ANY_EXISTING_FILE_THAT_HAS_A_CRL_LIKE_FILENAME_BUT_CONTAINS_NON_CRL_DATA=no
+
+# status counters
+totalErrors=0
+totalWarnings=0
+
+#-----------------------------------------------------------------------------#
+#                               R O U T I N E S                               #
+#-----------------------------------------------------------------------------#
+
+#
+# RetrieveFileByURL - downloads a file given a URL and writes its contents to the
+#                     file pointed to by the ${tempFile} variable. You can use
+#                     replace the call to lynx by wget if you prefer.
+#                     Returns 0 if the specified URL can be donwloaded and stored
+#                     in a file
+#
+RetrieveFileByURL()
+{
+   url="$1"
+   destinationFile="$2"
+
+   downloadCacheUnmodified=0
+
+   if [ -s "${destinationFile}" ]; then
+     PrintError "RetrieveFileByURL: temporary file ${destinationFile} unexpectedly full of data"
+     exit 2
+   fi
+   #
+   # If you don't have 'wget' installed on your machine  or you prefer use 'lynx' instead, 
+   # uncomment next line and comment the following one.
+   #
+   # ${lynx} -source ${url} > ${destinationFile}
+   #
+   wgetOptions="${wgetAdditionalOptions}"
+
+   # did we specify no-server-check and does wget support it
+   if [ "$noServerCertCheck" -eq 1 -a \
+        `${wget} --help | ${grep} -c "no-check-certificate"` -eq 1 ]; then
+    wgetOptions="${wgetOptions} --no-check-certificate"
+   fi 
+
+   if [ `${wget} --help | ${grep} -c "ca-directory"` -eq 1 ]; then
+    wgetOptions="${wgetOptions} --ca-directory=\"${locationDirectory}\""
+   fi
+
+   # add the other default arguments
+   wgetOptions="${wgetOptions} -t $WGET_RETRIES -T $WGET_TIMEOUT "
+
+   # only add "-q" if the extra options do not have a -v. They are exclusive
+   expr match "${wgetAdditionalOptions}" '.*-v' >/dev/null 2>&1
+   [ $? -ne 0 ] && wgetOptions="${wgetOptions} -q"
+
+   wgetOptions="${wgetOptions} ${wgetAdditionalOptions}"
+
+   # if there is a cache directory, we retrieve to there with the original
+   # time stamp and only THEN copy to the destination file
+   # to get a unique name, we need to compute the hash costing time, but
+   # we save a lot on bandwith
+   if [ "X${cacheDirectory}" = "X" ]; then
+     PrintDebug ${wget} $wgetOptions -O "${destinationFile}" "${url}"
+     ${wget} $wgetOptions -O "${destinationFile}" "${url}"
+   else
+     hash=`echo "${url}" | ${sum} | awk '{ print $1 }'`
+     if [ X"${hash}" = "X" ]; then
+       PrintError "Calculating digest of ${url} failed, internal error"
+       exit 2
+     fi
+     [ -d "${cacheDirectory}/${hash}" ] || mkdir "${cacheDirectory}/${hash}"
+     urlBasename=`echo "${url}" | ${sed} -e 's/.*\///'`
+     ${rm} -f "${cacheDirectory}/${hash}/pre"
+     ${cp} "${cacheDirectory}/${hash}/"* \
+           "${cacheDirectory}/${hash}/pre" >/dev/null 2>&1
+     PrintDebug ${wget} ${wgetOptions} -N -P "${cacheDirectory}/${hash}" "${url}"
+     ${wget} ${wgetOptions} -N -P "${cacheDirectory}/${hash}" "${url}"
+     rc=$?
+     if [ $rc -ne 0 ]; then
+       PrintWarning "RetrieveFileByURL: wget download error $rc for ${url}"
+       ${rm} -f "${cacheDirectory}/${hash}/pre" > /dev/null 2>&1
+       return 1
+     fi
+
+     # note if the content did not change
+     ${cmp} "${cacheDirectory}/${hash}/"* > /dev/null 2>&1
+     if [ $? -eq 0 ]; then
+       downloadCacheUnmodified=1
+     fi
+     ${rm} -f "${cacheDirectory}/${hash}/pre"
+
+     cat "${cacheDirectory}/${hash}/"* > "${destinationFile}"
+   fi
+
+   if [ ! -s "${destinationFile}" ]; then
+     if [ "$noServerCertCheck" -eq 1 ]; then
+       PrintError "RetrieveFileByURL: download no data from ${url}"
+       return 1
+     else
+       PrintError "RetrieveFileByURL: download no data from ${url} or server certificate not recognised"
+       return 1
+     fi
+   fi
+   return $?
+}
+
+#
+# ShowUsage - show this program usage
+#
+ShowUsage()
+{
+   echo
+   echo "Usage:" ${programName} "[-h|--help]" 
+   echo "      " ${programName} "[-l|--loc <locationDirectory>]" 
+   echo "                     [-o|--out <outputDirectory>] [-q|--quiet]" 
+   echo "                     [-a|--agingtolerance <hours>]"
+   echo
+   echo "   Options:"
+   echo
+   echo "      -h|--help show this help"
+   echo
+   echo "      -l|--loc  <locationDirectory>"
+   echo "                The script will search this directory for files with the"
+   echo "                suffix '.${crlLocationFileSuffix}'. It is supposed that each one of these"
+   echo "                files contains the URL of a Certificate Revocation List (CRL)"
+   echo "                for a Certification Authority. This URL is of the form "
+   echo "                http://www.myhost.com/myCRL."
+   echo "                Note: the CRL files to download must be in either PEM or"
+   echo "                      DER format."
+   echo "                For validity checking of the CA certificates, this script"
+   echo "                assumes that the certificates of the CAs are found also"
+   echo "                in this directory."
+   echo "                Default: output directory (see below)"
+   echo
+   echo "      -o|--out  <outputDirectory>"
+   echo "                directory where to put the downloaded and processed CRLs."
+   echo "                The directory to be used as argument for this option"
+   echo "                is typically /etc/grid-security/certificates"
+   echo "                Default: current working directory"
+   echo 
+   echo "      -a|--agingtolerance hours"
+   echo "              The  maximum  age  of the locally downloaded CRL before download"
+   echo "              failures trigger actual error messages. This error message  sup-"
+   echo "              pression  mechanism  only  works  if the crl_url files are named"
+   echo "              after the hash of the CRL issuer  name,  a  stat(1)  command  is"
+   echo "              installed,  and a CRL has already been downloaded at least once."
+   echo 
+   echo
+   echo "      -q|--quiet"
+   echo "                Quiet mode (do not print information messages)"
+   echo
+   echo "      -v|--verbose"
+   echo "                Verbose mode (print all information and warn messages)"
+   echo
+   echo "      -n|--no-check-certificate"
+   echo "                Do not check the server certificate when downloading CRLs. This"
+   echo "                is the default."
+   echo "      --check-server-certificate"
+   echo "                Reverse: do ccheck server certificate when downloading CRLs."
+   echo
+   echo "      -f|--syslog-facility facility"
+   echo "                Also log messages and errors to syslog facility <fac>"
+   echo "                Messages are logged at level DEBUG, errors at level ERR."
+   echo
+   echo "   Defaults can be set in the fetch-crl system configuration file"
+   echo "   $FETCH_CRL_SYSCONFIG (resettable via the FETCH_CRL_SYSCONFIG environment"
+   echo "   variable, see manual for details)."
+   echo
+}
+
+#
+# Print information message
+#
+PrintMessage()
+{
+   if [ ${verboseMode} -eq 0 ]; then
+      return
+   fi
+   printLog debug DEBUG "$*"
+}
+
+PrintDebug()
+{
+   if [ "X${DEBUGGING}" != "Xyes" ]; then
+      return
+   fi
+   printLog debug DEBUG "$*"
+}
+
+#
+# Print higher-level information message
+#
+PrintInformation()
+{
+   if [ ${verboseMode} -eq 0 ]; then
+      return
+   fi
+   printLog info INFO "$*"
+}
+
+#
+# Print warning message (with counter)
+#
+PrintWarning()
+{
+   totalWarnings=`expr $totalWarnings + 1`
+   if [ ${verboseMode} -eq 0 -a ${allWarnings} != "yes" ]; then
+      return
+   fi
+   printLog warn WARNING "$*"
+}
+
+#
+# Print error message
+#
+PrintError()
+{
+   totalErrors=`expr $totalErrors + 1`
+   printLog err ERROR "$*"
+}
+
+printLog()
+{
+   if [ $# -lt 2 ]; then
+     syslogSeverity="err"
+     prefixString="CRITICALERROR"
+     message="printLog called with incorrect parameters. Internal error"
+   else
+     syslogSeverity=$1
+     prefixString=$2
+     shift 2
+     message="$@"
+   fi
+
+   timeStamp=`${date} +%Y%m%dT%H%M%S%z`
+   echo ${programName}"["$$"]: "${timeStamp} "$*" 1>&2
+
+   if [ "$outputLogFile" -a -w "$outputLogFile" ]; then
+     echo ${prefixString}": "${programName}"["$$"]: "${timeStamp} "$message" >> "$outputLogFile"
+   fi
+
+   if [ "$syslogfacility" ]; then
+      logger -p "${syslogfacility}.${syslogSeverity}" -t "${programName}[$$]" -- ${timeStamp} "$message"
+   fi
+}
+
+#
+# get date of lastUpdate from CRL file in standard format YYYYMMDDhh (dont use mmss, since
+# some systems cannot handle numbers larger than MAXINT in test(1) comparisons
+#
+LastUpdateOfCRL()
+{
+  crlhashfile="$1"
+
+  if [ ! -r "${crlhashfile}" ]; then
+    lastUpdate=0000000000
+    nextUpdate=0000000000
+    return
+  fi
+
+  u2date='
+  BEGIN {
+   im["Jan"]=1;im["Feb"]=2;im["Mar"]=3;im["Apr"]=4;im["May"]=5;im["Jun"]=6;
+   im["Jul"]=7;im["Aug"]=8;im["Sep"]=9;im["Oct"]=10;im["Nov"]=11;im["Dec"]=12;
+  }
+  /.*Update=/ { 
+    m=substr($1,index($1,"=")+1); 
+    h=substr($3,0,2); mi=substr($3,4,2); s=substr($3,7,2); 
+    printf "%04d%02d%02d%02d\n",$4,im[m],$2,h;
+  }
+  '
+
+  lastUpdateText=`${openssl} crl -noout -in "${crlhashfile}" -lastupdate`
+  lastUpdate=`echo $lastUpdateText | ${awk} "$u2date"`
+  nextUpdateText=`${openssl} crl -noout -in "${crlhashfile}" -nextupdate`
+  nextUpdate=`echo $nextUpdateText | ${awk} "$u2date"`
+}
+
+#
+# ValidateCRLHashFile
+#
+ValidateCRLHashFile()
+{
+   crlhashfile="$1"
+
+   conversionSucceeded="no"
+   supportedFormats="PEM DER"
+   for format in ${supportedFormats}; do
+      crlHashValue=`${openssl} crl -hash -inform ${format} -in ${crlhashfile} \
+                                   -noout 2>/dev/null | ${awk} '{print $1}'`
+
+      if [ "X${crlHashValue}" != "X" ]; then
+         conversionSucceeded="yes"
+         break
+      fi
+   done
+
+   fileHashValue=`${basename} "${crlhashfile}" ".r0"`
+   if [ x"${fileHashValue}" != x"${crlHashValue}" ]; then
+      conversionSucceeded="no"
+   fi
+
+   crlHashFileIsValid=${conversionSucceeded}
+
+   PrintMessage "File ${crlhashfile} valid: ${crlHashFileIsValid}"
+}
+
+#
+# ProcessCRLFile
+#
+ProcessCRLFile()
+{
+   downloadedFile="$1"
+   
+   #
+   # Compute hash value to build the CRL file name
+   #
+   pemFile=`${mktemp} -q ${tempDir}/crlpem-XXXXXX`
+   if [ $? -ne 0 ]; then
+       PrintError "can't create temp file in ${tempDir}, exiting..."
+       exit 2
+   fi
+   conversionSucceeded="no"
+   supportedFormats="PEM DER"
+   for format in ${supportedFormats}; do
+      crlHashValue=`${openssl} crl -hash -inform ${format} -in "${downloadedFile}" \
+                                   -out ${pemFile} 2>/dev/null | ${awk} '{print $1}'`
+
+      if [ "X"${crlHashValue} != "X" ]; then
+         conversionSucceeded="yes"
+         break
+      fi
+   done
+
+   ${rm} -f "${downloadedFile}" 2>/dev/null
+   if [ ${conversionSucceeded} = "no" ]; then
+      return 1
+   fi
+
+   #
+   # Rename the converted CRL file
+   #
+   result="${pemFile}"
+   resulthash=${crlHashValue}
+
+   #
+   # We are done
+   # 
+   return 0
+}
+
+
+#-----------------------------------------------------------------------------#
+#                                 M  A  I  N                                  #
+#-----------------------------------------------------------------------------#
+
+# read defaults that used to be set by the cron job
+if [ -r "$FETCH_CRL_SYSCONFIG" ] ; then
+  . "$FETCH_CRL_SYSCONFIG"
+  if [ "X${CRLDIR}" != "X" ]; then
+    locationDirectory="${CRLDIR}"
+    outputDirectory="${CRLDIR}"
+  fi
+  if [ "X${CACHEDIR}" != "X" ]; then
+    cacheDirectory="${CACHEDIR}"
+  fi
+  if [ "X${SLOPPYCACHEDIR}" != "X" ]; then
+    cacheDirectory="${SLOPPYCACHEDIR}"
+    sloppyCacheMode=1
+  fi
+  if [ "X${SLOPPYCRLHASHES}" != "X" ]; then
+    sloppyCacheMode=1
+  fi
+  if [ "X${QUIET}" = "Xyes" ]; then
+    verboseMode=0
+  fi
+  if [ "X${SERVERCERTCHECK}" = "Xno" ]; then
+    noServerCertCheck=1
+  fi
+  if [ "X${SERVERCERTCHECK}" = "Xyes" ]; then
+    noServerCertCheck=0
+  fi
+  if [ "X${TMPDIR}" != "X" ]; then
+    tempDir="${TMPDIR}"
+  fi
+  if [ "X${SYSLOGFACILITY}" != "X" ]; then
+    syslogfacility="${SYSLOGFACILITY}"
+  fi
+  if [ "X${RESETPATHMODE}" != "X" ]; then
+    resetpathmode="${RESETPATHMODE}"
+  fi
+  if [ "X${ALLWARNINGS}" != "X" ]; then
+    allWarnings="${ALLWARNINGS}"
+  fi
+  if [ "X${LOGFILE}" != "X" ]; then
+    outputLogFile="${LOGFILE}"
+  fi
+  if [ "X${CRL_AGING_THRESHOLD}" != "X" ]; then
+    cRLAgingThreshold="${CRL_AGING_THRESHOLD}"
+  fi
+  if [ "X${FORCE_OVERWRITE}" = "Xyes" ]; then
+    I_TAKE_FULL_RESPONSIBILITY_FOR_OVERWRITING_ANY_EXISTING_FILE_THAT_HAS_A_CRL_LIKE_FILENAME_BUT_CONTAINS_NON_CRL_DATA=yes_i_really_do
+  fi
+  if [ "X${WGET_OPTS}" != "X" ]; then
+    wgetAdditionalOptions="${WGET_OPTS}"
+  fi
+fi
+
+case "${resetpathmode}" in
+yes|Yes|YES|full|FULL|Full ) 
+  PATH=/bin:/usr/bin
+  SSLPATH="${PATH}"
+  ;;
+searchopenssl )
+  SSLPATH="${PATH}"
+  PATH=/bin:/usr/bin
+  ;;
+no|No|NO )
+  SSLPATH="${PATH}"
+  ;;
+* )
+  PrintError "RESETPATHMODE setting ($resetpathmode) is not a valid option"
+  exit 2
+  ;;
+esac
+
+
+#
+# Parse the command line
+#
+getoptResult=`${getopt} -o hl:o:qva:nf -a -l help,loc:,out:,quiet,verbose,agingtolerance,no-check-certificate,syslog-facility,check-server-certificate -n ${programName} -- "$@"`
+if [ $? != 0 ] ; then
+   ShowUsage
+   exit 2
+fi
+
+eval set -- "${getoptResult}"
+while true ; do
+   case "$1" in
+      -h|--help)  helpRequested="true" ; shift ;;
+      -l|--loc)   locationDirectory="$2"; shift 2 ;;
+      -n|--no-check-certificate)   noServerCertCheck=1; shift 1 ;;
+      --check-server-certificate)   noServerCertCheck=0; shift 1 ;;
+      -f|--syslog-facility)   syslogfacility="$2"; shift 1 ;;
+      -o|--out)   outputDirectory="$2"; shift 2 ;;
+      -q|--quiet) verboseMode=0; shift ;;
+      -v|--verbose) verboseMode=1; shift ;;
+      -a|--agingtolerance) cRLAgingThreshold="$2"; shift 2 ;;
+      --)         shift; break;;
+      *)          echo ${programName}": internal error!" ; exit 2 ;;
+   esac
+done
+
+#
+# Are there extra arguments?
+#
+if [ $1 ]; then
+   echo ${programName}": unexpected argument '"$1"'"
+   ShowUsage
+   exit 2
+fi
+
+#
+# Did the user request help?
+#
+if [ "X${helpRequested}" = "Xtrue" ]; then
+   ShowUsage
+   exit 0
+fi
+
+# give hint to syslog that we started, if syslog is enabled
+
+timeStamp=`${date} +%Y%m%dT%H%M%S%z`
+PrintInformation "Starting CRL retrieval process at ${timeStamp}"
+
+#
+# Make sure that we can write to the specified output directory
+#
+if [ ! -d "${outputDirectory}" -o ! -w "${outputDirectory}" ]; then
+   PrintError "'"${outputDirectory}"' is not a directory or cannot be written"
+   exit 2
+fi
+
+#
+# Look for the Globus configuration file and extract the root of the Globus installation and the
+# path of the configuration file
+#
+globusSysconfigFile="/etc/sysconfig/globus"
+if [ -r ${globusSysconfigFile} ]; then
+    globusLocation=`${grep} -i "^[[:space:]]*GLOBUS_LOCATION" ${globusSysconfigFile} | ${sed} "s/^[[:space:]]*//g" | ${awk} -F'=' '{print $2}' | ${sed} "s/[[:space:]]*//g"`
+    if [ "X${globusLocation}" != "X" ]; then
+        GLOBUS_LOCATION="${globusLocation}"
+    fi
+
+    globusConfigurationFile=`${grep} -i "^[[:space:]]*GLOBUS_CONFIG" ${globusSysconfigFile} | ${sed} "s/^[[:space:]]*//g" | ${awk} -F'=' '{print $2}' | ${sed} "s/[[:space:]]*//g"`
+fi
+
+
+#
+# Make sure the location directory exists
+#
+if [ "X${locationDirectory}" = "X" ]; then
+   #
+   # Location directory is not supplied. Let's try to find where it may be.
+   # Look into the Globus configuration file for extracting the directory where
+   # the certificates are located.
+   #
+   if [ "X${globusConfigurationFile}" = "X" ]; then
+      globusConfigurationFile="/etc/globus.conf"
+   fi
+
+   if [ -r "${globusConfigurationFile}" ]; then
+      certDir=`${grep} "^[ ]*X509_CERT_DIR" "${globusConfigurationFile}" | ${sed} "s/^[[:space:]]*//g" | ${awk} -F'=' '{print $2}' | ${sed} "s/[[:space:]]*//g"`
+      if [ "X${certDir}" != "X" ]; then
+         if [ -d "${certDir}" ]; then
+            locationDirectory="${certDir}"
+         fi
+      fi
+   fi
+fi
+
+if [ "X${locationDirectory}" = "X" ]; then
+   locationDirectory="${outputDirectory}"
+fi
+
+if [ ! -d "${locationDirectory}" ]; then
+   PrintError "'"${locationDirectory}"' is not a directory or cannot be read"
+   exit 2
+fi
+
+# If a cacheDirectory is set, it MUST be wrtiable for us
+if [ "X${cacheDirectory}" != "X" ]; then
+  if [ ! -d "${cacheDirectory}" -o ! -w "${cacheDirectory}" ]; then
+   PrintError "Cache '"${cacheDirectory}"' not a directory or cannot be written"
+   exit 2
+  fi
+fi
+
+#
+# This script needs "openssl", which can be installed within the Globus
+# hierarchy or elsewhere. Let's try to find it, but make sure we get the
+# latest version
+#
+if test "x${FETCH_CRL_OPENSSL}" = "x" 
+then
+  OIFS="$IFS"
+  IFS=":"
+  openssl_paths=""
+  for p in $SSLPATH ; do
+    if test "x${openssl_paths}" = "x" 
+    then
+      openssl_paths="$p/openssl"
+    else
+      openssl_paths="${openssl_paths}:$p/openssl"
+    fi
+  done
+  openssl_paths="${openssl_paths}:$openssl:/usr/local/bin/openssl:/usr/bin/openssl"
+  if [ ! -z "${GLOBUS_LOCATION}" ]; then
+     if [ -x "${GLOBUS_LOCATION}/bin/openssl" ]; then
+        openssl_paths="${GLOBUS_LOCATION}/bin/openssl:$openssl_paths"
+     fi
+  fi
+
+  oversion="OpenSSL 0"
+  for probe in $openssl_paths ; do
+    if test -x "$probe" ; then
+      pversion=`"$probe" version 2>/dev/null`
+      if test `expr "x$pversion" \> "x$oversion"` -eq 1 ; then
+        openssl="$probe"
+        oversion="$pversion"
+      fi
+    fi
+  done
+  IFS=" 	
+"
+  PrintMessage "Using OpenSSL version $oversion at $openssl"
+else
+  openssl="${FETCH_CRL_OPENSSL}"
+  PrintMessage "Using prespecified version of OpenSSL at $openssl"
+fi
+
+if [ ! -x "${openssl}" ]; then
+  PrintError "openssl not found - define GLOBUS_LOCATION or create '${globusConfigFile}'"
+  exit 2
+fi
+
+
+#
+# Initialize the group name for the 'globus' user
+#
+
+#
+# Look for CRL location files with the expected suffix
+#
+locationFiles=`${ls} "${locationDirectory}"/*.${crlLocationFileSuffix} 2>/dev/null`
+if [ "X${locationFiles}" = "X" ]; then
+   PrintError "no files with suffix '."${crlLocationFileSuffix}"' found in '"${locationDirectory}"'"
+   exit 2
+fi
+
+#
+# Process each one of the CRL location files
+#
+for nextLocationFile in ${locationFiles}; do
+
+   PrintMessage "processing '"${nextLocationFile}"'"
+   locationFileBasename=`${basename} "${nextLocationFile}"`
+
+   CRLDownloadError=0
+   errorsCRLDownloadError=""
+
+   while true ; do
+      #
+      # Extract the next URL from this CRL location file
+      #
+      read nextLine
+      if [ $? != 0 ]; then
+         break
+      fi
+
+      nextURL=`echo "${nextLine}" | ${awk} -F'#' '{print $1}'`
+      if [ -z ${nextURL} ]; then
+         # This is a comment or a blank line, skip it
+         continue
+      fi
+
+      #
+      # Download this CRL
+      #
+      tempFile=`${mktemp} -q ${tempDir}/crl-dg.XXXXXX`
+      if [ $? -ne 0 ]; then
+             PrintError "can't create temp file in ${tempDir}, exiting..."
+             exit 2
+      fi
+
+      RetrieveFileByURL "${nextURL}" "${tempFile}"
+      if [ $? != 0 ]; then
+         CRLDownloadError=1
+         errorsCRLDownloadError="$errorsCRLDownloadError ${nextURL}"
+         PrintInformation "could not download a valid file from '"${nextURL}"'"
+         ${rm} -f ${tempFile}
+         continue
+      else
+         CRLDownloadError=0
+         errorMessageCRLDownloadError=""
+      fi
+
+      # if in sloppy caching mode, we can see if the file actually changed
+      if [ "X${sloppyCacheMode}" = "Xyes" -a "X${cacheDirectory}" != "X" -a \
+           "X${downloadCacheUnmodified}" = "X1" ]; then
+        # if the content is unmodifed, no need to re-check the lot
+        # just touch to satisfy the checking tools and go on to the next one
+        crlHash=`$basename ${locationFileBasename} .crl_url`
+        finalCrlFileName="${crlHash}.r0"
+        if [ -s "${outputDirectory}/${finalCrlFileName}" ]; then
+          PrintMessage "Data in cache for sloppy ${finalCrlFileName} unchanged"
+          touch "${outputDirectory}/${finalCrlFileName}"
+          continue
+        fi
+      fi
+
+      #
+      # Process and rename the downloaded file and figure out the real hash
+      #
+      ProcessCRLFile "${tempFile}"
+      if [ $? != 0 ]; then
+         PrintMessage "downloaded file from ${nextURL} is not a valid CRL file"
+         CRLDownloadError=1
+         errorsCRLDownloadError="$errorsCRLDownloadError ${nextURL}"
+         errorMessageCRLDownloadError="download for ${nextURL} is not valid and none of the URLs in '"${nextLocationFile}"' is operational"
+         continue
+      fi
+      crlFile="${result}"
+      crlHash=${resulthash}
+      finalCrlFileName="${crlHash}.r0"
+
+      # if in proper caching mode, we can see if the file actually changed
+      if [ "X${cacheDirectory}" != "X" -a \
+           "X${downloadCacheUnmodified}" = "X1" ]; then
+        # if the content is unmodifed, no need to re-check the lot
+        # just touch to satisfy the checking tools and go on to the next one
+        if [ -s "${outputDirectory}/${finalCrlFileName}" ]; then
+          PrintMessage "Data in cache for ${finalCrlFileName} unchanged"
+          touch "${outputDirectory}/${finalCrlFileName}"
+          ${rm} -f "${crlFile}" > /dev/null 2>&1
+          continue
+        fi
+      fi
+
+      # 
+      # Verify this CRL
+      #
+      issuer=`"${openssl}" crl -inform "PEM" -in "${crlFile}" -issuer -noout | ${awk} '{print substr($0,index($0,"/CN=")+4)}'`
+      issuer="$issuer (${resulthash})"
+      verifyResult=`"${openssl}" crl -CApath "${locationDirectory}" -in "${crlFile}" -noout 2>&1`
+      if [ "X${verifyResult}" != "Xverify OK" ]; then
+         PrintError "verify failed for CRL issued by '"${issuer}"' (${verifyResult}), downloaded from ${nextURL} in file ${locationFileBasename}"
+         ${rm} -f ${crlFile} 2>/dev/null
+         continue
+      fi
+
+      #
+      # Move the temporary file to the output directory and set the appropriate file
+      # permissions and ownership
+      #
+      PrintMessage "updating CRL '"${issuer}"'"
+      ${chmod} 0644 "${crlFile}"
+
+      if [ -e "${outputDirectory}/${finalCrlFileName}" ]; then
+        ValidateCRLHashFile "${outputDirectory}/${finalCrlFileName}"
+        if [ x"${crlHashFileIsValid}" != x"yes" ]; then
+          if [ x"$I_TAKE_FULL_RESPONSIBILITY_FOR_OVERWRITING_ANY_EXISTING_FILE_THAT_HAS_A_CRL_LIKE_FILENAME_BUT_CONTAINS_NON_CRL_DATA" = x"yes_i_really_do" ]; then
+            PrintWarning "File ${outputDirectory}/${finalCrlFileName} is " \
+		         "not a valid CRL, but forced-overwrite is in effect."
+
+            savefile=`${mktemp} -q ${outputDirectory}/${finalCrlFileName}.preserved.XXXXXX`
+            if [ x"${savefile}" = x"" ]; then
+              PrintError "Overwrite specified by the save file could not " \
+                         "be created in ${outputDirectory}"
+              PrintError "${outputDirectory} is not writable for " \
+                         "preservation file, exiting"
+              exit 2
+            else 
+              ${mv} "${outputDirectory}/${finalCrlFileName}" "${savefile}"
+              PrintMessage "As you specified the old file will be replaced"
+              PrintMessage "Previous data contents saved in $savefile"
+             fi
+          else 
+            PrintError "Attempt to overwrite" \
+		"${outputDirectory}/${finalCrlFileName}" \
+		"failed since original file is not a valid CRL. " \
+                "Download for ${issuer} did NOT succeed."
+            PrintMessage "Ignoring this CRL download for ${issuer}"
+            continue
+          fi
+        fi
+      fi
+
+      # is the new CRL indeed newer than the current one?
+      LastUpdateOfCRL "${outputDirectory}/${finalCrlFileName}"
+      currentLastUpdate=$lastUpdate
+      currentNextUpdate=$nextUpdate
+      LastUpdateOfCRL "${crlFile}"
+      newLastUpdate=$lastUpdate
+      newNextUpdate=$nextUpdate
+      today=`date -u '+%Y%m%d%H'`
+
+      if [ $newLastUpdate -gt $today ]; then
+        PrintError "Warning: CRL downloaded from ${nextCRL} has lastUpdate " \
+                   "time in the future. Verify local clock and " \
+                   "inspect ${finalCrlFileName}."
+      fi
+
+      if [ $newLastUpdate -lt $currentLastUpdate -a \
+           $currentLastUpdate -le $today ]; then
+          PrintError "Attempt to install " \
+		${finalCrlFileName} \
+		"failed since the current CRL is more recent " \
+                "than the one that was downloaded."
+      else
+        if [ $currentLastUpdate -gt $today ]; then
+          PrintWarning "CRL ${finalCrlFileName} replaced with downloaded " \
+                       "one, since current one has a lastUpdate time in the " \
+                       "future."
+        fi
+        ${mv} "${crlFile}" "${outputDirectory}/${finalCrlFileName}" > /dev/null 2>&1
+        CRLDownloadError=0
+        errorMessageCRLDownloadError=""
+      fi
+
+      #
+      # Check the validity of the CA certificate
+      #
+      caCertificate=`${basename} "${finalCrlFileName}" ".r0"`".0"
+      verifyResult=`"${openssl}" verify -CApath "${locationDirectory}" "${locationDirectory}/${caCertificate}" 2>&1`
+      verifyResultStatus=`echo "${verifyResult}" | ${awk} '{print $2}'`
+      if [ "X${verifyResultStatus}" != "XOK" ]; then
+         PrintMessage "Verify failed for CA certificate issued by '"${issuer}"' (${verifyResult})"
+      fi
+   done < "${nextLocationFile}"  # while
+
+
+   if [ $CRLDownloadError -ne 0 ]; then
+      # this may be a cause for errors, but suppress if nextLocationFile
+      # name resembles a hash AND the associated hash.r0 file is younger than
+      # cRLAgingThreshold
+      if [ -x ${stat} ]; then 
+      hashFileName=`basename "${nextLocationFile}" ".${crlLocationFileSuffix}"`
+      if [ `expr "${hashFileName}" : [a-fA-F0-9]\\\\{8\\\\}` -eq 8 ]; then
+        if [ -f "${outputDirectory}/${hashFileName}.r0" ]; then
+          currentTimeFile=`${mktemp} -q "${tempDir}/fetch-crl-ts.XXXXXX"`
+          nowAge=`${stat} -t "${currentTimeFile}" | ${awk} '{print $13}'`
+          ${rm} -f "${currentTimeFile}"
+          hashFileTime=`${stat} -t "${outputDirectory}/${hashFileName}.r0" | \
+                          ${awk} '{print $13}'`
+          hashFileAge=`expr \( $nowAge - $hashFileTime \) / 3600`
+          if [ ${hashFileAge} -le ${cRLAgingThreshold} ]; then
+            if [ $currentNextUpdate -lt $today ]; then
+              PrintError "CRL download failed (${hashFileAge} hours) for ${hashFileName} and current CRL has either expired or is not yet present"
+            else
+              CRLDownloadError=0
+              PrintMessage "CRL download error for ${hashFileName} suppressed"
+            fi
+          else
+            PrintError "Persistent errors (${hashFileAge} hours) for ${hashFileName}:"
+          fi
+        fi
+      fi
+      fi
+
+      if [ $CRLDownloadError -ne 0 ]; then
+        PrintError "Could not download any CRL from $nextLocationFile:"
+        for url in $errorsCRLDownloadError 
+        do
+          PrintError "download failed from '"${url}"'"
+        done
+        if [ "${errorMessageCRLDownloadError}" ]; then 
+	  PrintError "${errorMessageCRLDownloadError}" 
+	fi
+      fi
+   fi
+
+done # for
+
+timeStamp=`${date} +%Y%m%dT%H%M%S%z`
+PrintInformation "Completed CRL retrieval process at ${timeStamp}"
+
+#
+# Done
+#
+if [ ${totalErrors} -gt 0  -o ${totalWarnings} -gt 0 ]; then
+  PrintInformation "There were $totalErrors errors and $totalWarnings warnings"
+fi
+if [ ${totalErrors} -gt 0 ]; then
+  exit 1
+fi
+exit 0

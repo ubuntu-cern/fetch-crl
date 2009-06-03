@@ -1,0 +1,60 @@
+FETCH-CRL version 2.x
+---------------------
+This tool and associated cron entry ensure that Certificate Revocation 
+Lists (CRLs) are periodically retrieved from the web sites of the respective 
+Certification Authorities.
+It assumes that the installed CA files follow the hash.crl_url convention.
+
+Note that this version does not support having multiple CA with the
+same subject name (since the hash .r0 files will collide)
+
+
+Installation
+------------
+The default installation directory is "/usr". This can be changed with the
+PREFIX variable setting to "make", like:
+
+	make install PREFIX=/opt/edg
+
+
+Configuration
+-------------
+
+By default, the fetch-crl script will operate on the current working 
+directory, where it looks for ".crl_url" files and will write the
+retrieved CRLs in the OpenSSL-compatible "<hash>.r0" filename
+convention.
+If the system configuration (RedHat-style) file "/etc/sysconfig/fetch-crl"
+exists, settings may be supplied there:
+
+	CRLDIR={path}
+		directory of the CRL and crl_url files. It will set bot 
+		the locationDirectory and the outputDirectory to the 
+		specified path.
+
+	QUIET={yes|no}
+		suppress printing of information messages
+
+	SERVERCERTCHECK={yes|no}
+		ignore or bark on unrecognised web server certs on download
+		the default (since 2.6.1) is "no", i.e. ignore unrecognised
+		server certificates as the CRL itself is already signed
+
+	SYSLOGFACILITY={facility}
+		if set, messages and errors will also be written to syslog(3)
+		using the logger(1) programme. Informational messages will
+		go in at severity DEBUG, errors at severity ERR.
+		(if left unset, syslog will not be used)
+
+
+Origin
+------
+The original version of edg-fetch-crl was written by
+# Author:      Fabio Hernandez                                                #
+#              fabio@in2p3.fr                                                 #
+#              IN2P3 Computer Center                                          #
+#              http://www.in2p3.fr/CC                                         #
+#              Lyon (FRANCE)                                                  #
+as part of the datagrid project (see http://www.edg.org/) 
+It is governed by the EU DataGrid open source license.
+

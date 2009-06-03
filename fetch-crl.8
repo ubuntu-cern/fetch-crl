@@ -1,0 +1,146 @@
+.\" "@(#)$Id: fetch-crl.8,v 1.5 2007/08/15 08:26:43 pmacvsdg Exp $"
+.\"
+.\" 
+.PU
+.TH FETCH-CRL 8 local "EUGridPMA Utilities"
+.SH NAME
+fetch-crl \- retrieve certificate revocation lists
+.SH SYNOPSIS
+.ll +8
+.B fetch-crl
+.RB [ \-l\ locationDirectory ]
+.RB [ \-o\ outputDirectory ]
+.RB [ \-a\ agingTolerance ]
+.RB [ " \-q " ]
+.ll -8
+.SH DESCRIPTION
+.I fetch-crl
+retrieves certificate revocation lists (CRLs). CRLs can be retrieved
+from web sites using the 
+.I HTTP 
+or 
+.I HTTPS
+protocols and can be in either 
+.I PEM
+or 
+.I DER
+encoded form. The URLs for the CRL download are to be found in files
+named 
+.I hash
+\.r0 and should accompany a CA root certificate with the same
+hash. Retrieving a CRL without an accompanying CA root certificate
+will result in a verification failure.
+.SH OPTIONS
+.TP
+.B \-h --help
+Show help text.
+.TP
+.B \-l --loc locationDirectory
+The script will search this directory for files with the
+suffix '.crl_url'. It is supposed that each one of these
+files contains the URL of a Certificate Revocation List (CRL)
+for a Certification Authority. This URL is of the form
+.IR http://www.myhost.com/myCRL .
+Note: the CRL files to download must be in either PEM or DER format.
+
+For validity checking of the CA certificates, this script
+assumes that the certificates of the CAs are found also
+in this directory. 
+
+Default: output directory (see below)
+.TP
+.B \-o --out  outputDirectory
+Directory where to put the downloaded and processed CRLs.
+The directory to be used as argument for this option
+is typically /etc/grid-security/certificates
+
+Default: current working directory
+.TP
+.B \-a --agingtolerance  hours
+The maximum age of the locally downloaded CRL before download 
+failures trigger actual error messages. This error message
+suppression mechanism only works if the crl_url files are named
+after the hash of the CRL issuer name, a stat(1) command
+is installed, and a CRL has already been downloaded at least once.
+
+Default: no aging tolerance
+.TP
+.B \-q --quiet
+Quiet mode (do not print information messages)
+
+.TP
+.B \-n, --no-check-certificate
+Do not check the server certificate when retrieving URLs. (see
+also: 
+.I SERVERCERTCHECK=no 
+in /etc/sysconfig/fetch-crl.
+
+.SH NOTES
+Defaults can be set in the fetch-crl system configuration file
+/etc/sysconfig/fetch-crl, using the CRLDIR and QUIET directives.
+If you want a specific version of OpenSSL to be used by 
+.I fetch-crl
+for converting and validating CRLs, set the 
+.B FETCH_CRL_OPENSSL
+environment variable (via /etc/sysconfig/fetch-crl).
+
+The script will try to use the latest version of OpenSSL to be found
+anywhere in your path or in 
+.B /usr/bin , /usr/local/bin
+(or in the 
+.B $GLOBUS_LOCATION/bin 
+directory when available). 
+Use of the latest version of OpenSSL is strongly encouraged.
+
+The fetch-crl script should preferably be run from 
+.BR cron "(8)"
+at least once every day. See 
+.BI /usr/share/doc/fetch-crl- version
+for en example cron job to install.
+
+Other configuration variables recognised in /etc/sysconfig/fetch-crl:
+.TP
+.BI WGET_RETRIES\  n
+Number of attempts of
+.I wget
+to obtain the CRL from the specified location.
+.TP
+.BI WGET_TIMEOUT\  seconds
+Number of seconds to wait for each stage of the http GET request
+(i.e. 
+.I seconds
+sec for DNS resolving, and the same amount for downloading, etc.)
+.TP
+.BI SERVERCERTCHECK\  "{yes,no}"
+When set to "no", the check of the server certificate validity is 
+suppressed (applies to 
+.I wget
+version 1.10 and higher only).
+.TP
+.BI WGET_OPTS\  options
+Additional command-line arguments to be passed to the invocations of 
+.I wget.
+.TP
+.BI LOGFILE\  filename
+In addition to all other message output mechanisms, also append 
+generated messages to the file
+.I filename
+.TP
+.BI CRL_AGING_THRESHOLD\  hours
+Only complain about failed CRL download if the download failed persistently
+for more than
+.I hours
+consecutive hours, or if the current time is past the advertised nextUpdate
+time for this CRL.
+
+.SH "SEE ALSO"
+openssl(1)
+
+.SH "DIAGNOSTICS"
+Exit status is normally 0;
+if an error occurs, exit status is 1 and diagnostics will be written
+to standard error.
+
+.SH BUGS
+The fetch-crl program cannot handle CRLs for multiple certificates with the
+same hash value. 

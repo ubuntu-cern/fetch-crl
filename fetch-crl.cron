@@ -1,0 +1,17 @@
+#!/bin/bash
+
+# Depending on the FETCH_CRL_SYSCONFIG setting, these may be read twice
+if [ -f /etc/sysconfig/fetch-crl ] ; then
+. /etc/sysconfig/fetch-crl
+fi
+
+CRLDIR=${CRLDIR:-/etc/grid-security/certificates} 
+
+QUIET=${QUIET:-yes}
+
+if [ $QUIET = "yes" ] ; then
+  /usr/sbin/fetch-crl  --loc $CRLDIR --out $CRLDIR -a 24 --quiet
+else
+  /usr/sbin/fetch-crl  --loc $CRLDIR --out $CRLDIR 
+fi
+
