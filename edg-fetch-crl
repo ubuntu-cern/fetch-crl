@@ -96,7 +96,7 @@ allWarnings=no                   # warnings follow verbosity
 # get defaults
 WGET_RETRIES=2
 WGET_TIMEOUT=10
-FETCH_CRL_SYSCONFIG="${FETCH_CRL_SYSCONFIG:-/etc/sysconfig/fetch-crl}"
+FETCH_CRL_SYSCONFIG="${FETCH_CRL_SYSCONFIG:-/etc/default/fetch-crl}"
 
 # specific work-around for incidental filesystem corruption
 # (please enable only in case you have broken hardware or a broken
@@ -587,7 +587,7 @@ fi
 # Look for the Globus configuration file and extract the root of the Globus installation and the
 # path of the configuration file
 #
-globusSysconfigFile="/etc/sysconfig/globus"
+globusSysconfigFile="/etc/default/globus"
 if [ -r ${globusSysconfigFile} ]; then
     globusLocation=`${grep} -i "^[[:space:]]*GLOBUS_LOCATION" ${globusSysconfigFile} | ${sed} "s/^[[:space:]]*//g" | ${awk} -F'=' '{print $2}' | ${sed} "s/[[:space:]]*//g"`
     if [ "X${globusLocation}" != "X" ]; then

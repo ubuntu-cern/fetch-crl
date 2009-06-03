@@ -1,0 +1,19 @@
+Source: fetch-crl
+Section: admin
+Priority: extra
+Standards-Version: 3.7.2
+Maintainer: Ubuntu CERN Team <ubuntu-cern-bugs@ninsei.hu>
+Build-Depends: debhelper (>= 3)
+
+Package: fetch-crl
+Architecture: all
+Section: admin
+Priority: extra
+Depends: wget, openssl
+Description: Tool for periodic retrieval of Certificate Revocation Lists
+ This tool and associated cron entry ensure that Certificate Revocation 
+ Lists (CRLs) are periodically retrieved from the web sites of the respective 
+ Certification Authorities.
+ .
+ It assumes that the installed CA files follow the hash.crl_url convention.
+

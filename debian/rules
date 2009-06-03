@@ -1,0 +1,45 @@
+#!/usr/bin/make -f
+#
+# debian/rules for fetch-crl
+#
+# GNU Copyright 2008-2009. 
+# Akos FROHNER <akos@frohner.hu>
+#
+
+SHELL := sh -e
+
+build:
+	dh_testdir
+
+clean:
+	dh_testdir
+	dh_testroot
+	dh_clean
+
+install: build
+	dh_testdir
+	dh_testroot
+	dh_prep
+
+binary-indep: build install
+	dh_testdir
+	dh_testroot
+	install -m755 -D edg-fetch-crl debian/fetch-crl/usr/sbin/fetch-crl
+	install -m755 -D fetch-crl.cron debian/fetch-crl/etc/cron.daily/fetch-crl
+	install -m644 -D fetch-crl.sysconfig debian/fetch-crl/etc/default/fetch-crl
+	dh_installman fetch-crl.8
+	dh_installchangelogs CHANGES
+	dh_installdocs README debian/EU-DataGrid-LICENSE
+	dh_fixperms
+	dh_compress
+	dh_installdeb
+	dh_gencontrol
+	dh_md5sums
+	dh_builddeb
+
+binary-arch:
+
+binary: binary-indep binary-arch
+
+.PHONY: build clean binary-indep binary-arch binary install
+

@@ -1,0 +1,5 @@
+fetch-crl (2.7.0-1) intrepid jaunty; urgency=low
+
+  * Initial release.
+
+ -- Frohner Ákos <akos@frohner.hu>  Wed, 03 Jun 2009 01:17:19 +0200
