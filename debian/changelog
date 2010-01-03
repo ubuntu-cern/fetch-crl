@@ -1,3 +1,9 @@
+fetch-crl (2.7.0-2) intrepid jaunty karmic; urgency=low
+
+  * Uploading to karmic. 
+
+ -- Frohner Ákos <akos@frohner.hu>  Sun, 03 Jan 2010 23:55:12 +0100
+
 fetch-crl (2.7.0-1) intrepid jaunty; urgency=low
 
   * Initial release.
